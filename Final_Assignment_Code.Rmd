@@ -1,0 +1,864 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r}
+# Introduction to Statistics Assignmen
+#  Code by Nikesh Adhikari
+
+# Load required libraries
+library(tidyverse)
+library(GGally)
+library(corrplot)
+library(zoo)  # For moving average
+library(ggplot2)
+library(tidyr)
+library(GGally)
+library(corrplot)
+library(dplyr)
+library(gridExtra)
+
+# Load dataset and rename columns
+data <- read.csv("dataset.csv")
+data <- data %>%
+  rename(
+    T = x1,   # Temperature (°C)
+    EP = x2,  # Net hourly electrical energy output (MW)
+    AP = x3,  # Ambient Pressure (millibar)
+    RH = x4,  # Relative Humidity (%)
+    V = x5    # Exhaust Vacuum (cm Hg)
+  )
+
+# Inspect structure and summary
+str(data)
+summary(data)
+colSums(is.na(data))
+
+# Create Index for Time Series
+data$Index <- 1:nrow(data)
+
+# Define Moving Average Window
+ma_window <- 50
+
+# Function to Plot Time Series with Moving Average and Sections
+plot_variable_analysis <- function(df, var_name) {
+  var_data <- df %>%
+    select(Index, value = all_of(var_name)) %>%
+    mutate(
+      MA = zoo::rollmean(value, k = ma_window, fill = NA, align = "center"),
+      Section = case_when(
+        Index <= nrow(df)/3 ~ "Early",
+        Index <= 2*nrow(df)/3 ~ "Middle",
+        TRUE ~ "Late"
+      )
+    )
+
+  p1 <- ggplot(var_data, aes(x = Index, y = value)) +
+    geom_line(color = "steelblue") +
+    geom_line(aes(y = MA), color = "red", linetype = "dashed") +
+    facet_wrap(~Section, scales = "free_x", ncol = 1) +
+    labs(title = paste("Time Series Analysis of", var_name),
+         y = var_name, x = "Index") +
+    theme_minimal()
+
+  ggsave(paste0("time_series_", var_name, ".png"), p1, width = 8, height = 6)
+  print(p1)
+}
+
+# Apply Analysis to Each Variable
+variables <- c("T", "EP", "AP", "RH", "V")
+walk(variables, ~plot_variable_analysis(data, .x))
+```
+
+```{r}
+# Distribution Plots with Mean/Median Lines
+
+dist_plots <- data %>%
+  pivot_longer(cols = c(T, EP, AP, RH, V), names_to = "Variable", values_to = "Value") %>%
+  group_by(Variable) %>%
+  mutate(
+    Mean = mean(Value, na.rm = TRUE),
+    Median = median(Value, na.rm = TRUE)
+  ) %>%
+  ggplot(aes(x = Value)) +
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "steelblue", alpha = 0.5) +
+  geom_density(color = "black", size = 0.8, alpha = 0.4) +
+  geom_vline(aes(xintercept = Mean), color = "red", linetype = "dashed", size = 0.7) +
+  geom_vline(aes(xintercept = Median), color = "blue", linetype = "dotted", size = 0.7) +
+  facet_wrap(~Variable, scales = "free", ncol = 2) +
+  labs(
+    title = "Distribution of CCPP Environmental and Output Variables",
+    subtitle = "Each plot shows histogram, density curve, and mean (red dashed) & median (blue dotted) lines",
+    x = "Value",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold")
+  )
+
+# Save high-quality version
+ggsave("distribution_plots.png", dist_plots, width = 12, height = 9, dpi = 300)
+print(dist_plots)
+
+```
+
+
+```{r}
+# Correlation Matrix and Scatter Plots
+
+# Subset relevant columns
+ccpp_vars <- data[, c("T", "EP", "AP", "RH", "V")]
+
+# Compute correlation matrix with NA handling
+cor_matrix <- cor(ccpp_vars, use = "complete.obs")
+
+# Plot correlation matrix with numerical values
+png("correlation_matrix.png", width = 800, height = 600)
+corrplot(cor_matrix, method = "number", type = "upper",
+         tl.col = "black", number.cex = 0.8,
+         mar = c(0,0,2,0))
+title("Correlation Matrix of CCPP Variables", line = 0.5)
+dev.off()
+
+# Create scatter plot matrix (GGally)
+scatter_matrix <- ggpairs(
+  ccpp_vars,
+  lower = list(continuous = wrap("points", alpha = 0.3, size = 1)),
+  diag = list(continuous = wrap("densityDiag", alpha = 0.5, fill = "steelblue")),
+  upper = list(continuous = wrap("cor", size = 3)),
+  title = "Scatter Plot Matrix of CCPP Variables"
+) +
+  theme_minimal(base_size = 13)
+
+# Save scatter plot matrix
+ggsave("scatter_plot_matrix.png", scatter_matrix, width = 12, height = 10, dpi = 300)
+print(scatter_matrix)
+
+
+# Step 6: Pairwise scatter plots with LOESS smoothing
+scatter_loess <- data %>%
+  pivot_longer(cols = c(T, AP, RH, V), names_to = "Predictor", values_to = "Value") %>%
+  ggplot(aes(x = Value, y = EP)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "loess", color = "red", se = FALSE) +
+  facet_wrap(~Predictor, scales = "free_x", ncol = 2) +
+  theme_minimal() +
+  labs(title = "Energy Output vs. Predictors with LOESS Smoothing", 
+       x = "Predictor Value", y = "Energy Output (MW)")
+ggsave("scatter_loess_plots.png", width = 10, height = 8)
+```
+
+```{r}
+# --- Task 2.1: Estimating Nonlinear Regression Model Parameters via Least Squares
+# Extract response variable and number of observations
+n <- nrow(data)
+y <- data$EP
+
+# Step 1: Standardize predictors to ensure numerical stability
+data_scaled <- data %>%
+  mutate(
+    T_std  = (T  - mean(T))  / sd(T),
+    AP_std = (AP - mean(AP)) / sd(AP),
+    RH_std = (RH - mean(RH)) / sd(RH),
+    V_std  = (V  - mean(V))  / sd(V)
+  )
+
+# Step 2: Define a function to compute least squares estimates with small ridge regularization
+fit_model <- function(X, y) {
+  lambda <- 1e-6  # Small ridge term to ensure numerical stability
+  XtX <- t(X) %*% X + lambda * diag(ncol(X))
+  theta <- solve(XtX) %*% t(X) %*% y
+  return(theta)
+}
+
+# Step 3: Construct feature matrices and estimate parameters for each model
+
+# Model 1: y = θ1*x4 + θ2*x3^2 + θ_bias
+X1 <- cbind(
+  x4 = data_scaled$RH_std,
+  x3_squared = data_scaled$AP_std^2,
+  bias = 1
+)
+theta1 <- fit_model(X1, y)
+
+# Model 2: y = θ1*x4 + θ2*x3^2 + θ3*x5 + θ_bias
+X2 <- cbind(
+  x4 = data_scaled$RH_std,
+  x3_squared = data_scaled$AP_std^2,
+  x5 = data_scaled$V_std,
+  bias = 1
+)
+theta2 <- fit_model(X2, y)
+
+# Model 3: y = θ1*x3 + θ2*x4 + θ3*x5^3 + θ_bias
+X3 <- cbind(
+  x3 = data_scaled$AP_std,
+  x4 = data_scaled$RH_std,
+  x5_cubed = data_scaled$V_std^3,
+  bias = 1
+)
+theta3 <- fit_model(X3, y)
+
+# Model 4: y = θ1*x4 + θ2*x3^2 + θ3*x5^3 + θ_bias
+X4 <- cbind(
+  x4 = data_scaled$RH_std,
+  x3_squared = data_scaled$AP_std^2,
+  x5_cubed = data_scaled$V_std^3,
+  bias = 1
+)
+theta4 <- fit_model(X4, y)
+
+# Model 5: y = θ1*x4 + θ2*x1^2 + θ3*x3^2 + θ_bias
+X5 <- cbind(
+  x4 = data_scaled$RH_std,
+  x1_squared = data_scaled$T_std^2,
+  x3_squared = data_scaled$AP_std^2,
+  bias = 1
+)
+theta5 <- fit_model(X5, y)
+
+# Step 4: Check for multicollinearity among transformed predictors
+cor_matrix <- cor(cbind(
+  RH_std     = data_scaled$RH_std,
+  AP_std2    = data_scaled$AP_std^2,
+  V_std      = data_scaled$V_std,
+  V_std3     = data_scaled$V_std^3,
+  T_std2     = data_scaled$T_std^2
+))
+cat("Correlation matrix of transformed predictors:\n")
+print(round(cor_matrix, 3))
+
+# Step 5: Store model parameters
+params <- list(
+  Model1 = theta1,
+  Model2 = theta2,
+  Model3 = theta3,
+  Model4 = theta4,
+  Model5 = theta5
+)
+
+# Save parameters for future use
+saveRDS(params, "model_parameters.rds")
+
+# Print estimated parameter vectors
+cat("\nEstimated Parameters for Each Model:\n")
+print(params)
+
+```
+```{r}
+# Task 2.2: Compute Residual Sum of Squares (RSS) for All Models
+
+# Load model parameters (if not already in memory)
+params <- readRDS("model_parameters.rds")
+
+# Response variable
+y <- data$EP
+
+# Define function to compute RSS
+compute_rss <- function(X, y, theta) {
+  y_pred <- X %*% theta
+  rss <- sum((y - y_pred)^2)
+  return(rss)
+}
+
+# Rebuild standardized features (ensure consistent with Task 2.1)
+data_scaled <- data %>%
+  mutate(
+    T_std  = (T  - mean(T))  / sd(T),
+    AP_std = (AP - mean(AP)) / sd(AP),
+    RH_std = (RH - mean(RH)) / sd(RH),
+    V_std  = (V  - mean(V))  / sd(V)
+  )
+
+# Construct design matrices using standardized variables (same as Task 2.1)
+X1 <- cbind(data_scaled$RH_std, data_scaled$AP_std^2, 1)
+X2 <- cbind(data_scaled$RH_std, data_scaled$AP_std^2, data_scaled$V_std, 1)
+X3 <- cbind(data_scaled$AP_std, data_scaled$RH_std, data_scaled$V_std^3, 1)
+X4 <- cbind(data_scaled$RH_std, data_scaled$AP_std^2, data_scaled$V_std^3, 1)
+X5 <- cbind(data_scaled$RH_std, data_scaled$T_std^2, data_scaled$AP_std^2, 1)
+
+# Compute RSS values
+rss1 <- compute_rss(X1, y, params$Model1)
+rss2 <- compute_rss(X2, y, params$Model2)
+rss3 <- compute_rss(X3, y, params$Model3)
+rss4 <- compute_rss(X4, y, params$Model4)
+rss5 <- compute_rss(X5, y, params$Model5)
+
+# Store and print RSS values
+rss_values <- c(
+  Model1 = rss1,
+  Model2 = rss2,
+  Model3 = rss3,
+  Model4 = rss4,
+  Model5 = rss5
+)
+
+# Save RSS results
+saveRDS(rss_values, "rss_values.rds")
+
+# Print RSS values nicely
+cat("Residual Sum of Squares (RSS) for all models:\n")
+print(round(rss_values, 2))
+
+
+
+```
+```{r}
+
+
+#Task 2.3
+#log-likelihood 
+
+compute_loglik <- function(rss, n) {
+  sigma2 <- rss / (n - 1)
+  loglik <- -n/2 * log(2 * pi) - n/2 * log(sigma2) - rss / (2 * sigma2)
+  return(loglik)
+}
+
+# Compute log-likelihood for each model
+loglik_values <- sapply(rss_values, compute_loglik, n = n)
+
+# Save log-likelihood values
+saveRDS(loglik_values, "loglik_values.rds")
+
+# Print for inspection
+print(loglik_values)
+```
+
+```{r}
+# Task 2.4
+# Load log-likelihood values (if not in memory)
+loglik_values <- readRDS("loglik_values.rds")  # Ensure this file exists
+
+# Define number of parameters (k) - corrected Model3 to 4
+k_values <- c(Model1 = 3, Model2 = 4, Model3 = 4, Model4 = 4, Model5 = 4)
+
+# Define sample size (replace 9563 with actual n if different)
+n <- 9563  # Example value; adjust based on your data
+
+# Compute AIC and BIC
+aic_values <- 2 * k_values - 2 * loglik_values
+bic_values <- k_values * log(n) - 2 * loglik_values
+
+# Combine and save results
+criteria <- data.frame(Model = names(loglik_values), AIC = aic_values, BIC = bic_values)
+saveRDS(criteria, "aic_bic_values.rds")
+
+# Print for inspection
+print(criteria)
+```
+```{r}
+# Task 2.5: Check Distribution of Model Prediction Errors (Residuals)
+
+# Ensure required objects are loaded
+params <- readRDS("model_parameters.rds")  # Model parameters from Task 2.1
+y <- data$EP  # Response variable (EP)
+
+# Compute predicted values and residuals for each model
+y_pred1 <- X1 %*% params$Model1
+y_pred2 <- X2 %*% params$Model2
+y_pred3 <- X3 %*% params$Model3
+y_pred4 <- X4 %*% params$Model4
+y_pred5 <- X5 %*% params$Model5
+
+residuals <- list(
+  Model1 = y - y_pred1,
+  Model2 = y - y_pred2,
+  Model3 = y - y_pred3,
+  Model4 = y - y_pred4,
+  Model5 = y - y_pred5
+)
+
+# Function to create residual plots (histogram + Q-Q plot) for a model
+plot_residual_analysis <- function(resids, model_name) {
+  # Create data frame for residuals
+  res_df <- data.frame(Residual = resids)
+  
+  # Histogram with density overlay
+  hist_plot <- ggplot(res_df, aes(x = Residual)) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = "steelblue", alpha = 0.5) +
+    geom_density(color = "black", size = 0.8) +
+    labs(title = paste("Residual Distribution -", model_name),
+         x = "Residual", y = "Density") +
+    theme_minimal()
+  
+  # Q-Q plot
+  qq_plot <- ggplot(res_df, aes(sample = Residual)) +
+    stat_qq(color = "steelblue", alpha = 0.5) +
+    stat_qq_line(color = "red", linetype = "dashed") +
+    labs(title = paste("Q-Q Plot -", model_name),
+         x = "Theoretical Quantiles", y = "Sample Quantiles") +
+    theme_minimal()
+  
+  # Combine plots
+  combined_plot <- grid.arrange(hist_plot, qq_plot, ncol = 2)
+  
+  # Save the plot
+  ggsave(paste0("residual_analysis_", model_name, ".png"), combined_plot, width = 10, height = 5)
+  
+  return(combined_plot)
+}
+
+# Apply the plotting function to each model's residuals
+model_names <- names(residuals)
+lapply(seq_along(residuals), function(i) {
+  plot_residual_analysis(residuals[[i]], model_names[i])
+})
+
+# Optionally, save residuals for further analysis
+saveRDS(residuals, "residuals.rds")
+```
+```{r}
+#Task 2.6
+
+#  Display and select best model
+print(criteria)
+best_model <- criteria[which.min(criteria$AIC), "Model"]
+cat("Best model based on AIC:", best_model, "\n")
+
+# Save selection
+writeLines(best_model, "best_model.txt")
+
+
+```
+```{r}
+# Task 2.7: Train-Test Split, Re-estimate Model 3, Predict, and Plot with Confidence Intervals
+# Load data and best model (Model 3)
+data <- read.csv("dataset.csv")
+data <- data %>%
+  rename(T = x1, EP = x2, AP = x3, RH = x4, V = x5)
+y <- data$EP
+
+# Standardize predictors (consistent with Task 2.1)
+data_scaled <- data %>%
+  mutate(
+    AP_std = (AP - mean(AP)) / sd(AP),
+    RH_std = (RH - mean(RH)) / sd(RH),
+    V_std  = (V  - mean(V))  / sd(V)
+  )
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Split data: 70% training, 30% testing
+n <- nrow(data)
+train_idx <- sample(1:n, size = 0.7 * n)
+train_data <- data_scaled[train_idx, ]
+test_data <- data_scaled[-train_idx, ]
+y_train <- y[train_idx]
+y_test <- y[-train_idx]
+
+# Construct design matrix for Model 3 (AP_std, RH_std, V_std^3, bias) on training data
+X_train <- cbind(
+  AP_std = train_data$AP_std,
+  RH_std = train_data$RH_std,
+  V_std_cubed = train_data$V_std^3,
+  bias = 1
+)
+
+# Re-estimate Model 3 parameters using training data
+fit_model <- function(X, y) {
+  lambda <- 1e-6  # Small ridge term for stability
+  XtX <- t(X) %*% X + lambda * diag(ncol(X))
+  theta <- solve(XtX) %*% t(X) %*% y
+  return(theta)
+}
+theta3_new <- fit_model(X_train, y_train)
+
+# Construct design matrix for testing data
+X_test <- cbind(
+  AP_std = test_data$AP_std,
+  RH_std = test_data$RH_std,
+  V_std_cubed = test_data$V_std^3,
+  bias = 1
+)
+
+# Compute predictions on testing data
+y_pred_test <- X_test %*% theta3_new
+
+# Compute 95% confidence intervals for predictions
+# Residual variance from training data
+residuals_train <- y_train - (X_train %*% theta3_new)
+sigma2 <- sum(residuals_train^2) / (nrow(X_train) - ncol(X_train))  # Residual variance
+# Variance of predictions: sigma^2 * diag(X_test (X_train'X_train)^(-1) X_test')
+XtX_inv <- solve(t(X_train) %*% X_train)
+pred_var <- sigma2 * rowSums((X_test %*% XtX_inv) * X_test)  # Variance of predictions
+se_pred <- sqrt(pred_var)  # Standard error of predictions
+z <- qnorm(0.975)  # Z-score for 95% CI
+ci_lower <- y_pred_test - z * se_pred
+ci_upper <- y_pred_test + z * se_pred
+
+# Prepare data for plotting
+plot_data <- data.frame(
+  Index = 1:length(y_test),
+  Observed = y_test,
+  Predicted = y_pred_test,
+  CI_Lower = ci_lower,
+  CI_Upper = ci_upper
+)
+
+# Plot predictions, observed values, and confidence intervals
+p <- ggplot(plot_data, aes(x = Index)) +
+  geom_point(aes(y = Observed), color = "blue", alpha = 0.5, size = 1, shape = 16) +
+  geom_line(aes(y = Predicted), color = "red", size = 1) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), color = "red", width = 0.2, alpha = 0.5) +
+  labs(title = "Model 3 Predictions on Test Data with 95% Confidence Intervals",
+       x = "Test Sample Index", y = "Energy Output (MW)") +
+  theme_minimal()
+
+# Save the plot
+ggsave("model3_test_predictions.png", p, width = 10, height = 6)
+
+# Print the plot
+print(p)
+
+# Save predictions and CIs
+saveRDS(plot_data, "model3_test_predictions.rds")
+```
+
+
+```{r}
+# Task 3: Approximate Bayesian Computation (ABC) for Model 3
+# Using rejection ABC method to compute posterior distributions of the two largest parameters of Model 3
+
+set.seed(123)
+
+# Load dataset and parameters from Task 2.1
+data <- read.csv("dataset.csv")
+data <- data %>%
+  rename(T = x1, EP = x2, AP = x3, RH = x4, V = x5)
+y <- data$EP
+params <- readRDS("model_parameters.rds")  # Load pre-computed parameters
+
+# Standardize predictors (consistent with Task 2.1)
+data_scaled <- data %>%
+  mutate(
+    T_std = (T - mean(T)) / sd(T),
+    AP_std = (AP - mean(AP)) / sd(AP),
+    RH_std = (RH - mean(RH)) / sd(RH),
+    V_std = (V - mean(V)) / sd(V)
+  )
+
+# Define response and predictors for Model 3 (AP_std, RH_std, V_std^3, bias)
+n <- nrow(data)
+X <- cbind(
+  x3 = data_scaled$AP_std,
+  x4 = data_scaled$RH_std,
+  x5_cubed = data_scaled$V_std^3,
+  bias = 1
+)
+
+# Use Model 3 parameters from Task 2.1
+theta <- params$Model3
+
+# Select two largest parameters (exclude bias, which is theta[4])
+abs_theta <- abs(theta[1:3])  # Consider θ1 (AP_std), θ2 (RH_std), θ3 (V_std^3)
+idx <- order(abs_theta, decreasing = TRUE)[1:2]  # Indices of two largest parameters
+param_names <- c("theta1_AP_std", "theta2_RH_std", "theta3_V_std3")[idx]
+
+# Set uniform priors (±50% of estimated values)
+ranges <- lapply(idx, function(i) {
+  val <- theta[i]
+  c(val - 0.5 * abs(val), val + 0.5 * abs(val))
+})
+
+# Compute observed RSS for tolerance
+y_pred_obs <- X %*% theta
+rss_obs <- sum((y - y_pred_obs)^2)
+tolerance <- rss_obs * 1.1  # Tolerance set to 110% of observed RSS
+
+# Rejection ABC
+n_sim <- 10000
+posterior <- matrix(NA, n_sim, 2)
+posterior_preds <- matrix(NA, n_sim, nrow(data))
+accepted <- 0
+
+for (i in 1:n_sim) {
+  theta_sim <- theta
+  theta_sim[idx[1]] <- runif(1, ranges[[1]][1], ranges[[1]][2])
+  theta_sim[idx[2]] <- runif(1, ranges[[2]][1], ranges[[2]][2])
+  y_pred <- X %*% theta_sim
+  rss <- sum((y - y_pred)^2)
+  if (rss < tolerance) {
+    accepted <- accepted + 1
+    posterior[accepted, ] <- theta_sim[idx]
+    posterior_preds[accepted, ] <- y_pred
+  }
+}
+
+# Trim to accepted simulations
+posterior <- posterior[1:accepted, ]
+colnames(posterior) <- param_names
+posterior_preds <- posterior_preds[1:accepted, ]
+
+# Summarize posterior distribution
+posterior_summary <- data.frame(
+  Parameter = param_names,
+  Mean = colMeans(posterior),
+  Median = apply(posterior, 2, median),
+  Lower_95CI = apply(posterior, 2, quantile, probs = 0.025),
+  Upper_95CI = apply(posterior, 2, quantile, probs = 0.975),
+  stringsAsFactors = FALSE
+)
+
+# Print posterior summary
+cat("\nPosterior Distribution Summary for Model 3:\n")
+print(posterior_summary)
+
+# Save posterior for further use
+saveRDS(posterior, "posterior_model3.rds")
+
+# Plot joint and marginal posteriors
+p1 <- ggplot(data.frame(posterior), aes(x = .data[[param_names[1]]], y = .data[[param_names[2]]])) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Joint Posterior Distribution (Model 3)", x = param_names[1], y = param_names[2]) +
+  theme_minimal()
+
+p2 <- ggplot(data.frame(posterior), aes(x = .data[[param_names[1]]])) +
+  geom_density() +
+  labs(title = paste("Marginal Posterior of", param_names[1]), x = param_names[1]) +
+  theme_minimal()
+
+p3 <- ggplot(data.frame(posterior), aes(x = .data[[param_names[2]]])) +
+  geom_density() +
+  labs(title = paste("Marginal Posterior of", param_names[2]), x = param_names[2]) +
+  theme_minimal()
+
+# Posterior predictive check plot
+pred_samples <- apply(posterior_preds, 1, function(pred) pred[sample(1:nrow(data), 100)])
+pred_df <- data.frame(Value = as.vector(pred_samples), Type = "Predicted")
+obs_df <- data.frame(Value = rep(y, 10), Type = "Observed")
+plot_data <- rbind(pred_df, obs_df)
+p4 <- ggplot(plot_data, aes(x = Value, fill = Type)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Posterior Predictive Check: Observed vs. Predicted EP (Model 3)", x = "Energy Output (MW)") +
+  theme_minimal()
+
+# Arrange and save plots
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+ggsave("abc_posterior_plots.png", width = 10, height = 8)
+
+
+```
+```{r}
+
+# Analyzing posteriors by keeping subsets of parameters constant
+
+set.seed(123)
+
+# Load dataset and parameters from Task 2.1
+data <- read.csv("dataset.csv")
+data <- data %>%
+  rename(T = x1, EP = x2, AP = x3, RH = x4, V = x5)
+y <- data$EP
+params <- readRDS("model_parameters.rds")  # Load pre-computed parameters
+
+# Standardize predictors (consistent with Task 2.1)
+data_scaled <- data %>%
+  mutate(
+    T_std = (T - mean(T)) / sd(T),
+    AP_std = (AP - mean(AP)) / sd(AP),
+    RH_std = (RH - mean(RH)) / sd(RH),
+    V_std = (V - mean(V)) / sd(V)
+  )
+
+# Define response and predictors for Model 3 (AP_std, RH_std, V_std^3, bias)
+n <- nrow(data)
+X <- cbind(
+  x3 = data_scaled$AP_std,
+  x4 = data_scaled$RH_std,
+  x5_cubed = data_scaled$V_std^3,
+  bias = 1
+)
+
+# Use Model 3 parameters from Task 2.1
+theta <- params$Model3
+cat("Original least squares estimates for Model 3:\n")
+print(theta)
+
+# Compute observed RSS for tolerance
+y_pred_obs <- X %*% theta
+rss_obs <- sum((y - y_pred_obs)^2)
+tolerance <- rss_obs * 1.1  # Tolerance set to 110% of observed RSS
+
+# Scenario 1: Keep theta_1 and theta_2 constant, vary theta_3
+# Define uniform prior for theta_3 (±50% of estimated value)
+theta3_range <- c(theta[3] - 0.5 * abs(theta[3]), theta[3] + 0.5 * abs(theta[3]))
+
+# Rejection ABC for theta_3
+n_sim <- 10000
+posterior_theta3 <- numeric(n_sim)
+posterior_preds_theta3 <- matrix(NA, n_sim, nrow(data))
+accepted_theta3 <- 0
+
+for (i in 1:n_sim) {
+  theta_sim <- theta
+  theta_sim[3] <- runif(1, theta3_range[1], theta3_range[2])
+  y_pred <- X %*% theta_sim
+  rss <- sum((y - y_pred)^2)
+  if (rss < tolerance) {
+    accepted_theta3 <- accepted_theta3 + 1
+    posterior_theta3[accepted_theta3] <- theta_sim[3]
+    posterior_preds_theta3[accepted_theta3, ] <- y_pred
+  }
+}
+
+# Trim to accepted simulations
+posterior_theta3 <- posterior_theta3[1:accepted_theta3]
+posterior_preds_theta3 <- posterior_preds_theta3[1:accepted_theta3, ]
+
+# Summarize posterior for theta_3
+theta3_summary <- data.frame(
+  Parameter = "theta3_V_std3",
+  Mean = mean(posterior_theta3),
+  Median = median(posterior_theta3),
+  Lower_95CI = quantile(posterior_theta3, probs = 0.025),
+  Upper_95CI = quantile(posterior_theta3, probs = 0.975),
+  stringsAsFactors = FALSE
+)
+
+# Print results for Scenario 1
+cat("\nScenario 1: Keeping theta_1 and theta_2 constant, varying theta_3\n")
+cat("Acceptance rate:", accepted_theta3/n_sim, "\n")
+cat("Posterior Summary for theta_3:\n")
+print(theta3_summary)
+
+# Scenario 2: Keep theta_3 and theta_4 constant, vary theta_1 and theta_2
+# Define uniform priors for theta_1 and theta_2 (±50% of estimated values)
+ranges <- list(
+  c(theta[1] - 0.5 * abs(theta[1]), theta[1] + 0.5 * abs(theta[1])),
+  c(theta[2] - 0.5 * abs(theta[2]), theta[2] + 0.5 * abs(theta[2]))
+)
+
+# Rejection ABC for theta_1 and theta_2
+posterior <- matrix(NA, n_sim, 2)
+posterior_preds <- matrix(NA, n_sim, nrow(data))
+accepted <- 0
+
+for (i in 1:n_sim) {
+  theta_sim <- theta
+  theta_sim[1] <- runif(1, ranges[[1]][1], ranges[[1]][2])
+  theta_sim[2] <- runif(1, ranges[[2]][1], ranges[[2]][2])
+  y_pred <- X %*% theta_sim
+  rss <- sum((y - y_pred)^2)
+  if (rss < tolerance) {
+    accepted <- accepted + 1
+    posterior[accepted, ] <- theta_sim[1:2]
+    posterior_preds[accepted, ] <- y_pred
+  }
+}
+
+# Trim to accepted simulations
+posterior <- posterior[1:accepted, ]
+colnames(posterior) <- c("theta1_AP_std", "theta2_RH_std")
+posterior_preds <- posterior_preds[1:accepted, ]
+
+# Summarize posterior distribution
+posterior_summary <- data.frame(
+  Parameter = c("theta1_AP_std", "theta2_RH_std"),
+  Mean = colMeans(posterior),
+  Median = apply(posterior, 2, median),
+  Lower_95CI = apply(posterior, 2, quantile, probs = 0.025),
+  Upper_95CI = apply(posterior, 2, quantile, probs = 0.975),
+  stringsAsFactors = FALSE
+)
+
+# Print results for Scenario 2
+cat("\nScenario 2: Keeping theta_3 and theta_4 constant, varying theta_1 and theta_2\n")
+cat("Acceptance rate:", accepted/n_sim, "\n")
+cat("Posterior Summary for theta_1 and theta_2:\n")
+print(posterior_summary)
+
+# Posterior predictive check for Scenario 2 (theta_1 and theta_2 varying)
+pred_samples <- apply(posterior_preds, 1, function(pred) pred[sample(1:nrow(data), 100)])
+pred_df <- data.frame(Value = as.vector(pred_samples), Type = "Predicted")
+obs_df <- data.frame(Value = rep(y, 10), Type = "Observed")
+plot_data <- rbind(pred_df, obs_df)
+
+# Plot posterior predictive check
+p1 <- ggplot(plot_data, aes(x = Value, fill = Type)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Posterior Predictive Check (theta_1, theta_2 varying)", x = "Energy Output (MW)") +
+  theme_minimal()
+
+# Plot marginal posterior for theta_3 (Scenario 1)
+p2 <- ggplot(data.frame(theta3 = posterior_theta3), aes(x = theta3)) +
+  geom_density() +
+  labs(title = "Marginal Posterior of theta_3", x = "theta3_V_std3") +
+  theme_minimal()
+print(p1)
+print(p2)
+```
+
+
+```{r}
+# Additional Analysis for Model 3
+library(caret)      # For cross-validation
+library(ggplot2)    # For plotting
+library(dplyr)      # For data manipulation
+
+
+data <- read.csv("dataset.csv")
+data <- data %>%
+  rename(T = x1, EP = x2, AP = x3, RH = x4, V = x5)
+data_scaled <- data %>%
+  mutate(
+    T_std = (T - mean(T)) / sd(T),
+    AP_std = (AP - mean(AP)) / sd(AP),
+    RH_std = (RH - mean(RH)) / sd(RH),
+    V_std = (V - mean(V)) / sd(V)
+  )
+
+# 5x2-fold CV for Model 3
+set.seed(123)
+folds <- createFolds(data$EP, k = 2, list = TRUE, returnTrain = TRUE)
+cv_results <- replicate(5, {
+  rss_cv <- sapply(folds, function(train_idx) {
+    train_data <- data_scaled[train_idx, ]
+    test_data <- data_scaled[-train_idx, ]
+    X_train <- cbind(train_data$AP_std, train_data$RH_std, train_data$V_std^3, 1)
+    y_train <- train_data$EP
+    # Least squares with ridge regularization (lambda = 1e-6)
+    theta <- solve(t(X_train) %*% X_train + 1e-6 * diag(4)) %*% t(X_train) %*% y_train
+    X_test <- cbind(test_data$AP_std, test_data$RH_std, test_data$V_std^3, 1)
+    y_pred <- X_test %*% theta
+    sum((test_data$EP - y_pred)^2)
+  })
+  mean(rss_cv)
+})
+cat("5x2-fold CV RSS for Model 3:", mean(cv_results), "±", sd(cv_results), "\n")
+
+# Feature importance via permutation
+perm_importance <- function(X, y, theta, feature_idx) {
+  X_perm <- X
+  X_perm[, feature_idx] <- sample(X_perm[, feature_idx])
+  y_pred <- X %*% theta
+  y_pred_perm <- X_perm %*% theta
+  mean((y - y_pred_perm)^2) - mean((y - y_pred)^2)
+}
+params <- readRDS("model_parameters.rds")
+theta <- params$Model3  # Use Model 3 parameters
+X <- cbind(data_scaled$AP_std, data_scaled$RH_std, data_scaled$V_std^3, 1)
+imp <- sapply(1:3, function(i) perm_importance(X, data$EP, theta, i))
+imp_df <- data.frame(Feature = c("AP_std", "RH_std", "V_std^3"), Importance = imp)
+
+# Print feature importance results
+cat("\nFeature Importance for Model 3:\n")
+print(imp_df)
+
+# Plot feature importance (confirming visualization per guidelines)
+
+ggplot(imp_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+   geom_bar(stat = "identity", fill = "steelblue") +
+   labs(title = "Feature Importance for Model 3", x = "Feature", y = "Increase in MSE") +
+   coord_flip() +
+   theme_minimal()
+ ggsave("feature_importance_model3.png", width = 8, height = 6)
+```
+
